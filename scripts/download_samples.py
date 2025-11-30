@@ -21,15 +21,17 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Sample video sources (public domain / CC0 licensed)
-# These are placeholder URLs - replace with actual working URLs
+# Sample video sources from MuseTalk repository
 SAMPLE_VIDEOS = {
-    "sample_avatar": {
-        "url": "https://www.pexels.com/download/video/3252106/",
-        "filename": "sample_avatar.mp4",
-        "description": "Sample talking head video for avatar",
-        # Alternative: direct mp4 link if pexels doesn't work
-        "alt_url": None,
+    "sun": {
+        "url": "https://raw.githubusercontent.com/TMElyralab/MuseTalk/main/data/video/sun.mp4",
+        "filename": "sun.mp4",
+        "description": "MuseTalk sample avatar (sun)",
+    },
+    "yongen": {
+        "url": "https://raw.githubusercontent.com/TMElyralab/MuseTalk/main/data/video/yongen.mp4",
+        "filename": "yongen.mp4",
+        "description": "MuseTalk sample avatar (yongen)",
     },
 }
 
