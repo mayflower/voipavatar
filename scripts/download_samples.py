@@ -33,17 +33,19 @@ SAMPLE_VIDEOS = {
     },
 }
 
-# Sample audio sources
+# Sample audio sources (public domain)
 SAMPLE_AUDIO = {
     "sample_speech": {
-        "url": "https://www2.cs.uic.edu/~i101/SoundFiles/gettysburg.wav",
+        # Open Speech Repository - Harvard sentences (public domain)
+        "url": "https://www.voiptroubleshooter.com/open_speech/american/OSR_us_000_0010_8k.wav",
         "filename": "sample_speech.wav",
-        "description": "Gettysburg Address audio sample (public domain)",
+        "description": "Harvard sentences (Open Speech Repository)",
     },
     "sample_short": {
-        "url": "https://www2.cs.uic.edu/~i101/SoundFiles/taunt.wav",
+        # Mozilla DeepSpeech test sample (CC0)
+        "url": "https://raw.githubusercontent.com/mozilla/DeepSpeech/master/data/smoke_test/LDC93S1.wav",
         "filename": "sample_short.wav",
-        "description": "Short speech sample for quick testing",
+        "description": "Short speech sample (LDC93S1)",
     },
 }
 
