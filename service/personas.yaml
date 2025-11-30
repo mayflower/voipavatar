@@ -1,0 +1,20 @@
+# Persona configuration file
+# Maps persona names to their avatar configuration
+
+default:
+  display_name: "Default Avatar"
+  video_path: "/opt/MuseTalk/assets/default_avatar.mp4"
+  inference_config: "/opt/MuseTalk/configs/inference/realtime.yaml"
+  bbox_shift: 0
+
+news_anchor:
+  display_name: "News Anchor"
+  video_path: "/opt/MuseTalk/assets/news_anchor.mp4"
+  inference_config: "/opt/MuseTalk/configs/inference/realtime.yaml"
+  bbox_shift: -5
+
+customer_support:
+  display_name: "Customer Support Agent"
+  video_path: "/opt/MuseTalk/assets/customer_support.mp4"
+  inference_config: "/opt/MuseTalk/configs/inference/realtime.yaml"
+  bbox_shift: 0
