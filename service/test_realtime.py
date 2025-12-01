@@ -62,6 +62,22 @@ def main():
         action="store_true",
         help="Use torch.compile() for faster inference (slower first run)",
     )
+    parser.add_argument(
+        "--tensorrt",
+        action="store_true",
+        help="Use TensorRT engines for fastest inference",
+    )
+    parser.add_argument(
+        "--tensorrt-dir",
+        type=str,
+        default="./models/tensorrt",
+        help="Path to TensorRT engine files (default: ./models/tensorrt)",
+    )
+    parser.add_argument(
+        "--gpu-blending",
+        action="store_true",
+        help="Use GPU-accelerated frame blending (~3x faster)",
+    )
     args = parser.parse_args()
 
     logger.info("=" * 60)
@@ -70,6 +86,8 @@ def main():
     logger.info(f"  Chunk duration: {args.chunk_duration}s")
     logger.info(f"  Target FPS: {args.target_fps}")
     logger.info(f"  Compile models: {args.compile}")
+    logger.info(f"  TensorRT: {args.tensorrt}")
+    logger.info(f"  GPU blending: {args.gpu_blending}")
 
     # Import here to avoid slow startup for --help
     from service.musetalk_adapter import MuseTalkAvatar
@@ -82,6 +100,9 @@ def main():
         models_dir="./models",
         device="cuda",
         compile_models=args.compile,
+        use_tensorrt=args.tensorrt,
+        tensorrt_dir=args.tensorrt_dir,
+        use_gpu_blending=args.gpu_blending,
     )
     init_time = time.time() - init_start
     logger.info(f"  Model initialization: {init_time:.2f}s")
@@ -184,8 +205,12 @@ def main():
                 logger.info("  Marginal: May struggle with additional overhead")
         else:
             logger.info("✗ NOT REAL-TIME: Processing is slower than real-time")
-            logger.info(f"  Need {1 / overall_realtime_ratio:.1f}x speedup for real-time")
-            logger.info("  Consider: batch processing, lower resolution, or GPU upgrade")
+            logger.info(
+                f"  Need {1 / overall_realtime_ratio:.1f}x speedup for real-time"
+            )
+            logger.info(
+                "  Consider: batch processing, lower resolution, or GPU upgrade"
+            )
 
         # LiveKit-specific recommendations
         logger.info("")

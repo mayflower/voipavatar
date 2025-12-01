@@ -85,6 +85,7 @@ class MuseTalkAvatar:
         compile_models: bool = False,
         use_tensorrt: bool = False,
         tensorrt_dir: str = "./models/tensorrt",
+        use_gpu_blending: bool = False,
     ) -> None:
         """
         Initialize MuseTalkAvatar with models and configuration.
@@ -100,6 +101,7 @@ class MuseTalkAvatar:
             compile_models: If True, use torch.compile() for 2-4x speedup (slower first run)
             use_tensorrt: If True, use TensorRT engines for UNet/VAE (fastest)
             tensorrt_dir: Directory containing TensorRT engine files
+            use_gpu_blending: If True, use GPU-accelerated frame blending (~3x faster)
 
         Raises:
             FileNotFoundError: If config file or models directory doesn't exist
@@ -108,6 +110,8 @@ class MuseTalkAvatar:
         self.use_tensorrt = use_tensorrt
         self.tensorrt_dir = tensorrt_dir
         self.trt_model = None
+        self.use_gpu_blending = use_gpu_blending
+        self.gpu_blender = None
         self.device = device
         self.dtype = dtype
         self.models_dir = models_dir
@@ -299,6 +303,26 @@ class MuseTalkAvatar:
         self._prepared = True
         logger.info(f"Loaded {len(self.frame_list_cycle)} frames from cache")
 
+        # Initialize GPU blender if enabled
+        self._prepare_gpu_blender()
+
+    def _prepare_gpu_blender(self) -> None:
+        """Initialize and prepare GPU blender with avatar data."""
+        if not self.use_gpu_blending:
+            return
+
+        from service.gpu_blending import GPUFrameBlender
+
+        logger.info("Initializing GPU blender...")
+        self.gpu_blender = GPUFrameBlender(device=self.device)
+        self.gpu_blender.prepare(
+            ref_frames=self.frame_list_cycle,
+            masks=self.mask_list_cycle,
+            coords=self.coord_list_cycle,
+            crop_boxes=self.mask_coords_list_cycle,
+        )
+        logger.info("GPU blender ready")
+
     def prepare_avatar(self, video_path: str, bbox_shift: int = 0) -> None:
         """
         Prepare an avatar from a reference video.
@@ -432,6 +456,9 @@ class MuseTalkAvatar:
 
         # Save to cache
         self._save_to_cache(cache_dir, video_path, bbox_shift)
+
+        # Initialize GPU blender if enabled
+        self._prepare_gpu_blender()
 
     def _is_silent(self, audio_float: np.ndarray) -> bool:
         """Check if audio is silent based on RMS energy."""
@@ -590,34 +617,60 @@ class MuseTalkAvatar:
                 )
                 pred_images = self.vae.decode_latents(pred_latents)
 
-        # Post-process each frame (CPU operations)
-        for i in range(num_frames):
-            frame_idx = frame_indices[i]
+        # Post-process frames (GPU or CPU blending)
+        if self.use_gpu_blending and self.gpu_blender is not None:
+            # GPU blending path - need face images as GPU tensor
+            # Convert pred_images to GPU tensor format: (B, 3, 256, 256) float32 RGB [0,1]
+            if isinstance(pred_images, np.ndarray):
+                # Convert numpy BGR to GPU tensor RGB
+                face_tensor = (
+                    torch.from_numpy(
+                        pred_images[:, :, :, ::-1].copy()  # BGR to RGB
+                    )
+                    .float()
+                    .permute(0, 3, 1, 2)
+                    / 255.0
+                )  # (B, H, W, C) -> (B, C, H, W)
+                face_tensor = face_tensor.to(self.device)
+            else:
+                # Already a tensor from VAE (need to normalize from [-1,1] to [0,1])
+                face_tensor = (pred_images / 2 + 0.5).clamp(0, 1).float()
+                # Ensure RGB format (B, 3, 256, 256)
+                if face_tensor.shape[1] != 3:
+                    face_tensor = face_tensor.permute(0, 3, 1, 2)
 
-            # Get precomputed data
-            ref_frame = self.frame_list_cycle[frame_idx]
-            coord = self.coord_list_cycle[frame_idx]
-            mask = self.mask_list_cycle[frame_idx]
-            crop_box = self.mask_coords_list_cycle[frame_idx]
-
-            pred_image = pred_images[i]
-
-            # Blend generated face into reference frame
-            x1, y1, x2, y2 = coord
-            crop_h, crop_w = y2 - y1, x2 - x1
-            pred_resized = cv2.resize(
-                pred_image, (crop_w, crop_h), interpolation=cv2.INTER_LANCZOS4
+            output_frames = self.gpu_blender.blend_batch_to_numpy(
+                face_tensor, frame_indices
             )
+        else:
+            # CPU blending path
+            for i in range(num_frames):
+                frame_idx = frame_indices[i]
 
-            output_frame = ref_frame.copy()
-            output_frame = get_image_blending(
-                output_frame, pred_resized, coord, mask, crop_box
-            )
+                # Get precomputed data
+                ref_frame = self.frame_list_cycle[frame_idx]
+                coord = self.coord_list_cycle[frame_idx]
+                mask = self.mask_list_cycle[frame_idx]
+                crop_box = self.mask_coords_list_cycle[frame_idx]
 
-            if output_frame.shape[2] == 4:
-                output_frame = output_frame[:, :, :3]
+                pred_image = pred_images[i]
 
-            output_frames.append(output_frame)
+                # Blend generated face into reference frame
+                x1, y1, x2, y2 = coord
+                crop_h, crop_w = y2 - y1, x2 - x1
+                pred_resized = cv2.resize(
+                    pred_image, (crop_w, crop_h), interpolation=cv2.INTER_LANCZOS4
+                )
+
+                output_frame = ref_frame.copy()
+                output_frame = get_image_blending(
+                    output_frame, pred_resized, coord, mask, crop_box
+                )
+
+                if output_frame.shape[2] == 4:
+                    output_frame = output_frame[:, :, :3]
+
+                output_frames.append(output_frame)
 
         # Update frame index for continuity
         self._frame_index = (self._frame_index + num_frames) % len(
