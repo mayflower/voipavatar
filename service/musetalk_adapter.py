@@ -83,6 +83,8 @@ class MuseTalkAvatar:
         cache_dir: str = "./results/avatars",
         silence_threshold: float = 0.01,
         compile_models: bool = False,
+        use_tensorrt: bool = False,
+        tensorrt_dir: str = "./models/tensorrt",
     ) -> None:
         """
         Initialize MuseTalkAvatar with models and configuration.
@@ -96,11 +98,16 @@ class MuseTalkAvatar:
             cache_dir: Directory for caching pre-computed avatar data
             silence_threshold: RMS threshold for silence detection (0.01 default)
             compile_models: If True, use torch.compile() for 2-4x speedup (slower first run)
+            use_tensorrt: If True, use TensorRT engines for UNet/VAE (fastest)
+            tensorrt_dir: Directory containing TensorRT engine files
 
         Raises:
             FileNotFoundError: If config file or models directory doesn't exist
         """
         self.compile_models = compile_models
+        self.use_tensorrt = use_tensorrt
+        self.tensorrt_dir = tensorrt_dir
+        self.trt_model = None
         self.device = device
         self.dtype = dtype
         self.models_dir = models_dir
@@ -139,7 +146,7 @@ class MuseTalkAvatar:
         self.pe = self.pe.to(device).to(dtype)
 
         # Apply torch.compile() for inference speedup
-        if compile_models:
+        if compile_models and not use_tensorrt:
             logger.info(
                 "Compiling models with torch.compile() (first inference will be slow)..."
             )
@@ -147,6 +154,22 @@ class MuseTalkAvatar:
             self.unet.model = torch.compile(self.unet.model, mode="default")
             self.vae.vae = torch.compile(self.vae.vae, mode="default")
             logger.info("Models compiled successfully")
+
+        # Load TensorRT engines if available
+        if use_tensorrt:
+            unet_engine = os.path.join(tensorrt_dir, "unet.engine")
+            vae_engine = os.path.join(tensorrt_dir, "vae_decoder.engine")
+            if os.path.exists(unet_engine) and os.path.exists(vae_engine):
+                from service.tensorrt_runtime import TensorRTMuseTalk
+
+                logger.info("Loading TensorRT engines...")
+                self.trt_model = TensorRTMuseTalk(unet_engine, vae_engine, device)
+                logger.info("TensorRT engines loaded successfully")
+            else:
+                logger.warning(
+                    f"TensorRT engines not found in {tensorrt_dir}, falling back to PyTorch"
+                )
+                self.use_tensorrt = False
 
         # Avatar state (populated by prepare_avatar)
         self.coord_list: list = []
@@ -534,24 +557,38 @@ class MuseTalkAvatar:
         ]
         input_latents = torch.cat(
             [self.input_latent_list_cycle[idx] for idx in frame_indices], dim=0
-        ).to(device=self.device, dtype=self.unet.model.dtype)
+        ).to(device=self.device, dtype=torch.float16)
 
         # Batched UNet + VAE inference
         with torch.no_grad():
             # Process all audio features in batch
             pe_cond = self.pe(whisper_chunks)
 
-            # Batched UNet inference
-            timesteps = torch.zeros(num_frames, dtype=torch.long, device=self.device)
-            pred_latents = self.unet.model(
-                input_latents,
-                timesteps,
-                encoder_hidden_states=pe_cond,
-            ).sample
+            if self.use_tensorrt and self.trt_model is not None:
+                # TensorRT inference path
+                timesteps = torch.zeros(
+                    num_frames, dtype=torch.int64, device=self.device
+                )
+                pred_latents = self.trt_model.unet_inference(
+                    input_latents, timesteps, pe_cond
+                )
+                pred_images = self.trt_model.decode_to_numpy(pred_latents)
+            else:
+                # PyTorch inference path
+                timesteps = torch.zeros(
+                    num_frames, dtype=torch.long, device=self.device
+                )
+                pred_latents = self.unet.model(
+                    input_latents,
+                    timesteps,
+                    encoder_hidden_states=pe_cond,
+                ).sample
 
-            # Batched VAE decode
-            pred_latents = pred_latents.to(device=self.device, dtype=self.vae.vae.dtype)
-            pred_images = self.vae.decode_latents(pred_latents)
+                # Batched VAE decode
+                pred_latents = pred_latents.to(
+                    device=self.device, dtype=self.vae.vae.dtype
+                )
+                pred_images = self.vae.decode_latents(pred_latents)
 
         # Post-process each frame (CPU operations)
         for i in range(num_frames):
