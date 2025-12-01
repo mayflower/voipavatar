@@ -48,8 +48,8 @@ def main():
     parser.add_argument(
         "--chunk-duration",
         type=float,
-        default=1.0,
-        help="Audio chunk duration in seconds (default: 1.0)",
+        default=0.5,
+        help="Audio chunk duration in seconds (default: 0.5 for ~0.9x realtime)",
     )
     parser.add_argument(
         "--target-fps",

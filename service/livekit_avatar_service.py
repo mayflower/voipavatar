@@ -42,7 +42,10 @@ logger = logging.getLogger(__name__)
 # Audio configuration
 AUDIO_SAMPLE_RATE = 16000  # 16 kHz mono PCM
 AUDIO_CHANNELS = 1
-AUDIO_CHUNK_DURATION_S = 1.0  # Accumulate 1 second of audio before processing
+# 500ms chunks = 12-13 frames at 25fps. With TensorRT, processing takes ~550ms
+# (0.91x realtime). This is close enough for streaming with a small buffer.
+# First-frame latency: ~800ms (500ms wait + ~300ms average processing start).
+AUDIO_CHUNK_DURATION_S = 0.5
 SAMPLES_PER_CHUNK = int(AUDIO_SAMPLE_RATE * AUDIO_CHUNK_DURATION_S)
 
 # Video configuration
