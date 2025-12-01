@@ -196,8 +196,12 @@ class MuseTalkAvatar:
         self._silence_fadeout_frames: int = (
             8  # Frames to fade out mouth (320ms at 25fps)
         )
+        self._silence_fadein_frames: int = 6  # Frames to fade in mouth (240ms at 25fps)
         self._fadeout_counter: int = 0
-        self._last_speaking_frames: list = []  # Store last few speaking frames for blending
+        self._last_speaking_frames: list = []  # Store last speaking frame for fadeout
+        self._last_idle_frame: np.ndarray | None = (
+            None  # Store last idle frame for fadein
+        )
 
         # Threading state
         self._request_queue: queue.Queue = queue.Queue(maxsize=2)
@@ -484,6 +488,9 @@ class MuseTalkAvatar:
         self._idle_frame_index = (self._idle_frame_index + num_frames) % len(
             self.frame_list_cycle
         )
+        # Store last idle frame for fade-in when speech starts
+        if frames:
+            self._last_idle_frame = frames[-1].copy()
         return frames
 
     def _generate_fadeout_frames(self, total_frames: int) -> list[np.ndarray]:
@@ -748,6 +755,24 @@ class MuseTalkAvatar:
         )
         # Sync idle frame index
         self._idle_frame_index = self._frame_index
+
+        # Apply fade-in if transitioning from silence to speech
+        if (
+            not self._was_speaking
+            and self._last_idle_frame is not None
+            and output_frames
+        ):
+            fadein_count = min(self._silence_fadein_frames, len(output_frames))
+            logger.debug(
+                f"Silence->speech transition, applying {fadein_count} frame fade-in"
+            )
+            for i in range(fadein_count):
+                # Ease-out curve: fast start, slow end (opposite of fadeout)
+                t = (i + 1) / fadein_count
+                alpha = 1.0 - (1.0 - t) ** 2  # Quadratic ease-out
+                output_frames[i] = cv2.addWeighted(
+                    self._last_idle_frame, 1.0 - alpha, output_frames[i], alpha, 0
+                )
 
         # Track speaking state for smooth silence transition
         self._was_speaking = True
