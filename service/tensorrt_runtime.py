@@ -2,6 +2,13 @@
 TensorRT runtime for MuseTalk inference.
 
 This module provides TensorRT-accelerated inference for UNet and VAE models.
+
+CUDA Stream Optimization:
+-------------------------
+This module uses dedicated CUDA streams and pinned memory to overlap:
+- GPU inference (UNet + VAE) on inference stream
+- GPU->CPU transfer using pinned memory (non-blocking)
+- This allows CPU post-processing to start while transfer completes
 """
 
 import logging
@@ -16,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class TensorRTEngine:
-    """Wrapper for TensorRT engine execution."""
+    """Wrapper for TensorRT engine execution with CUDA stream support."""
 
     def __init__(self, engine_path: str, device: str = "cuda"):
         """
@@ -34,6 +41,9 @@ class TensorRTEngine:
 
         # Initialize CUDA via PyTorch first (fixes TRT CUDA init issues)
         _ = torch.zeros(1, device=device)
+
+        # Create dedicated CUDA stream for this engine
+        self.stream = torch.cuda.Stream(device=device)
 
         # Load TensorRT engine
         self.logger = trt.Logger(trt.Logger.WARNING)
@@ -69,12 +79,15 @@ class TensorRTEngine:
             f"({len(self.input_names)} inputs, {len(self.output_names)} outputs)"
         )
 
-    def infer(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def infer(
+        self, inputs: dict[str, torch.Tensor], sync: bool = True
+    ) -> dict[str, torch.Tensor]:
         """
-        Run inference on the TensorRT engine.
+        Run inference on the TensorRT engine using dedicated stream.
 
         Args:
             inputs: Dictionary mapping input names to torch tensors on GPU
+            sync: If True, wait for inference to complete before returning
 
         Returns:
             Dictionary mapping output names to torch tensors on GPU
@@ -97,12 +110,18 @@ class TensorRTEngine:
         for name, tensor in outputs.items():
             self.context.set_tensor_address(name, tensor.data_ptr())
 
-        # Run inference
-        stream = torch.cuda.current_stream()
-        self.context.execute_async_v3(stream.cuda_stream)
-        stream.synchronize()
+        # Run inference on dedicated stream
+        with torch.cuda.stream(self.stream):
+            self.context.execute_async_v3(self.stream.cuda_stream)
+
+        if sync:
+            self.stream.synchronize()
 
         return outputs
+
+    def synchronize(self) -> None:
+        """Wait for any pending operations on this engine's stream."""
+        self.stream.synchronize()
 
     def _trt_dtype_to_torch(self, trt_dtype):
         """Convert TensorRT dtype to PyTorch dtype."""
@@ -184,6 +203,8 @@ class TensorRTMuseTalk:
         """
         Decode latents to numpy images (uint8).
 
+        Uses pinned memory for faster GPU->CPU transfer.
+
         Args:
             latents: Latents (batch, 4, 32, 32)
 
@@ -197,9 +218,21 @@ class TensorRTMuseTalk:
         images = (images / 2 + 0.5).clamp(0, 1)
         images = images.permute(0, 2, 3, 1)  # NCHW -> NHWC
         images = (images * 255).round().to(torch.uint8)
-        images = images.cpu().numpy()
+
+        # Use pinned memory for faster CPU transfer
+        # Allocate pinned buffer and copy non-blocking
+        pinned_buffer = torch.empty(
+            images.shape, dtype=torch.uint8, pin_memory=True, device="cpu"
+        )
+        pinned_buffer.copy_(images, non_blocking=True)
+
+        # Sync to ensure transfer is complete before converting to numpy
+        torch.cuda.current_stream().synchronize()
+
+        # Convert to numpy (fast - just wraps the pinned memory)
+        images_np = pinned_buffer.numpy()
 
         # RGB to BGR
-        images = images[..., ::-1].copy()
+        images_np = images_np[..., ::-1].copy()
 
-        return images
+        return images_np

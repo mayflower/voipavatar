@@ -191,6 +191,14 @@ class MuseTalkAvatar:
         self._idle_frame_index: int = 0
         self._frame_index: int = 0  # Current frame index for inference
 
+        # Smooth silence transition state
+        self._was_speaking: bool = False
+        self._silence_fadeout_frames: int = (
+            8  # Frames to fade out mouth (320ms at 25fps)
+        )
+        self._fadeout_counter: int = 0
+        self._last_speaking_frames: list = []  # Store last few speaking frames for blending
+
         # Threading state
         self._request_queue: queue.Queue = queue.Queue(maxsize=2)
         self._result_queue: queue.Queue = queue.Queue(maxsize=2)
@@ -478,6 +486,47 @@ class MuseTalkAvatar:
         )
         return frames
 
+    def _generate_fadeout_frames(self, total_frames: int) -> list[np.ndarray]:
+        """
+        Generate smooth fadeout frames when transitioning from speech to silence.
+
+        Blends from the last speaking frame to idle frames over several frames
+        to create a natural mouth-closing animation.
+        """
+        frames = []
+        fadeout_count = min(self._silence_fadeout_frames, total_frames)
+
+        # Get last speaking frame to blend from
+        last_speaking = (
+            self._last_speaking_frames[-1] if self._last_speaking_frames else None
+        )
+
+        for i in range(total_frames):
+            frame_idx = (self._idle_frame_index + i) % len(self.frame_list_cycle)
+            idle_frame = self.frame_list_cycle[frame_idx].copy()
+
+            if i < fadeout_count and last_speaking is not None:
+                # Blend from speaking to idle with easing
+                # Use ease-out curve for more natural deceleration
+                t = (i + 1) / fadeout_count
+                alpha = t * t  # Quadratic ease-in (slow start, fast end towards idle)
+                blended = cv2.addWeighted(
+                    last_speaking, 1.0 - alpha, idle_frame, alpha, 0
+                )
+                frames.append(blended)
+            else:
+                frames.append(idle_frame)
+
+        # Update idle frame index
+        self._idle_frame_index = (self._idle_frame_index + total_frames) % len(
+            self.frame_list_cycle
+        )
+
+        # Clear last speaking frames
+        self._last_speaking_frames = []
+
+        return frames
+
     def _extract_audio_features_direct(self, audio_16k: np.ndarray) -> list:
         """Extract Whisper features directly from numpy array (bypasses file I/O)."""
         # Split audio into 30s segments (same as AudioProcessor.get_audio_feature)
@@ -535,10 +584,22 @@ class MuseTalkAvatar:
         else:
             audio_float = audio_pcm.astype(np.float32)
 
-        # Check for silence - return idle animation instead
+        # Check for silence - handle smooth transition from speech to idle
         if self._is_silent(audio_float):
             duration = len(audio_pcm) / audio_sample_rate
+            num_frames = int(duration * self.fps)
+
+            # If we were speaking, generate smooth fadeout
+            if self._was_speaking and self._last_speaking_frames:
+                logger.debug(
+                    f"Speech->silence transition, generating {self._silence_fadeout_frames} fadeout frames"
+                )
+                self._was_speaking = False
+                fadeout_frames = self._generate_fadeout_frames(num_frames)
+                return fadeout_frames
+            # Already in idle state
             logger.debug(f"Silence detected, returning {duration:.2f}s idle animation")
+            self._was_speaking = False
             return self._generate_idle_frames(duration)
 
         # Resample to 16kHz if needed (Whisper requires 16kHz)
@@ -643,23 +704,22 @@ class MuseTalkAvatar:
                 face_tensor, frame_indices
             )
         else:
-            # CPU blending path
-            for i in range(num_frames):
-                frame_idx = frame_indices[i]
+            # CPU blending path with parallel processing
+            from concurrent.futures import ThreadPoolExecutor
 
-                # Get precomputed data
+            def blend_single_frame(args):
+                """Blend a single frame (for parallel execution)."""
+                i, frame_idx, pred_image = args
                 ref_frame = self.frame_list_cycle[frame_idx]
                 coord = self.coord_list_cycle[frame_idx]
                 mask = self.mask_list_cycle[frame_idx]
                 crop_box = self.mask_coords_list_cycle[frame_idx]
 
-                pred_image = pred_images[i]
-
-                # Blend generated face into reference frame
                 x1, y1, x2, y2 = coord
                 crop_h, crop_w = y2 - y1, x2 - x1
+                # Use INTER_LINEAR for speed (LANCZOS4 is ~3x slower)
                 pred_resized = cv2.resize(
-                    pred_image, (crop_w, crop_h), interpolation=cv2.INTER_LANCZOS4
+                    pred_image, (crop_w, crop_h), interpolation=cv2.INTER_LINEAR
                 )
 
                 output_frame = ref_frame.copy()
@@ -670,7 +730,17 @@ class MuseTalkAvatar:
                 if output_frame.shape[2] == 4:
                     output_frame = output_frame[:, :, :3]
 
-                output_frames.append(output_frame)
+                return i, output_frame
+
+            # Parallel blending with 4 workers
+            work_items = [
+                (i, frame_indices[i], pred_images[i]) for i in range(num_frames)
+            ]
+            output_frames = [None] * num_frames
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                for i, frame in executor.map(blend_single_frame, work_items):
+                    output_frames[i] = frame
 
         # Update frame index for continuity
         self._frame_index = (self._frame_index + num_frames) % len(
@@ -678,6 +748,12 @@ class MuseTalkAvatar:
         )
         # Sync idle frame index
         self._idle_frame_index = self._frame_index
+
+        # Track speaking state for smooth silence transition
+        self._was_speaking = True
+        # Store last frame for fadeout blending (keep only the last one)
+        if output_frames:
+            self._last_speaking_frames = [output_frames[-1].copy()]
 
         logger.debug(f"Generated {len(output_frames)} frames from audio chunk")
         return output_frames
